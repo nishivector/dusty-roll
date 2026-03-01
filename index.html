@@ -1,0 +1,1291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Dusty Roll</title>
+<link href="https://fonts.googleapis.com/css2?family=Alfa+Slab+One&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/tone@15.1.22/build/Tone.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.183.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.183.0/examples/jsm/"
+  }
+}
+</script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#C87A2E;touch-action:none}
+#gc{position:fixed;top:0;left:0;width:100%;height:100%;z-index:1}
+#hud-canvas{position:fixed;top:0;left:0;width:100%;height:100%;z-index:8;pointer-events:none}
+#ov{position:fixed;top:0;left:0;width:100%;height:100%;z-index:10;cursor:pointer}
+#sv{position:fixed;top:0;left:0;width:100%;height:100%;z-index:11;pointer-events:none}
+#is{position:fixed;top:0;left:0;width:100%;height:100%;z-index:12;background:rgba(0,0,0,.78);
+    display:none;flex-direction:column;align-items:center;justify-content:center;
+    color:#F5C842;text-align:center;padding:clamp(16px,4vw,40px);cursor:pointer}
+#is h2{font-family:'Alfa Slab One',serif;font-size:clamp(20px,5vw,48px);margin-bottom:20px}
+#is p{font-family:sans-serif;font-size:clamp(13px,2.2vw,22px);margin-bottom:12px;
+      color:#E8D870;max-width:560px;line-height:1.55}
+#is .tp{margin-top:28px;font-family:'Alfa Slab One',serif;font-size:clamp(15px,3vw,28px);
+        color:#F5C842;animation:blink 1s ease-in-out infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+#la{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:15;
+    color:#F5C842;font-family:'Alfa Slab One',serif;font-size:clamp(22px,5.5vw,60px);
+    text-align:center;text-shadow:3px 3px 12px #8B4513;pointer-events:none;display:none}
+#nh{position:fixed;top:14%;left:50%;transform:translateX(-50%);z-index:15;
+    color:#F5C842;font-family:'Alfa Slab One',serif;font-size:clamp(13px,2.8vw,26px);
+    background:rgba(0,0,0,.55);padding:7px 18px;border-radius:8px;
+    pointer-events:none;display:none;text-align:center}
+#ws{position:fixed;top:0;left:0;width:100%;height:100%;z-index:20;
+    background:rgba(255,255,255,0);display:none;flex-direction:column;
+    align-items:center;justify-content:center;pointer-events:none;
+    transition:background 2s ease}
+#wt{color:#5A3010;font-family:'Alfa Slab One',serif;font-size:clamp(18px,4.5vw,52px);
+    text-align:center;opacity:0;transition:opacity 1.2s ease .6s;padding:24px}
+</style>
+</head>
+<body>
+<div id="gc"></div>
+<canvas id="hud-canvas"></canvas>
+<div id="sv"></div>
+<div id="ov"></div>
+<!-- smoke-test sentinel: present on start screen, hidden once game begins -->
+<div id="startScreen" style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;pointer-events:none;opacity:1;display:block;"></div>
+<div id="is">
+  <h2>HOW TO ROLL</h2>
+  <p>Dusty cannot stop. He's been rolling since Tuesday. He's completely fine with that.</p>
+  <p><strong style="color:#F5C842">TAP</strong> — Hop over LOW obstacles (cacti, rocks, armadillos)</p>
+  <p><strong style="color:#F5C842">HOLD</strong> — Tuck low to pass under TALL obstacles (cars, signs, mailboxes)</p>
+  <p style="color:#FF9944">⚠ Being airborne doesn't protect from tall obstacles!</p>
+  <div class="tp">Tap anywhere to roll →</div>
+</div>
+<div id="la"></div>
+<div id="nh"></div>
+<div id="ws"><div id="wt">WELCOME TO NEW MEXICO<br><span style="font-size:.6em;color:#7A5030">Dusty rolled off into the sunset.<br>Still cheerful. Still rolling.</span></div></div>
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+// ─────────────────── CONSTANTS ────────────────────────────────────────────────
+const W = window.innerWidth, H = window.innerHeight;
+const BS = H / 1080; // base scale
+const TAP_MS = 80;
+const DR = 48 * BS;          // Dusty radius normal
+const DR_TUCK = 36 * BS;     // Dusty radius tucked
+const HOP_H = 120 * BS;      // max hop height
+const HOP_VEL = 550 * BS;    // initial upward velocity
+const GRAVITY = 1400 * BS;   // downward acceleration
+const ROAD_FRAC = 0.72;      // road surface Y as fraction from top
+const ROAD_WORLD_Y = -H / 2 + H * (1 - ROAD_FRAC); // world Y of road surface
+const DUSTY_X = -W / 2 + W * 0.25; // Dusty world X (fixed)
+const POLE_SPACING = W / 4.5;
+const DASH_SPACING = 60 * BS;
+
+const LEVELS = [
+  {name:'Dusty Backroad',   bg:0xD4860A, sky:0xE8A042, speed:280, density:2.8, goal:400,  lp:.70,tp:.30,wp:.00,mp:.00},
+  {name:'Busy Highway',     bg:0xBF7A1A, sky:0xDDA030, speed:350, density:2.0, goal:600,  lp:.40,tp:.40,wp:.20,mp:.00},
+  {name:'Tornado Alley',    bg:0x7A6040, sky:0xC0A858, speed:420, density:1.5, goal:800,  lp:.30,tp:.35,wp:.15,mp:.20},
+  {name:'Route 66 at Night',bg:0x3A2E1E, sky:0x201810, speed:490, density:1.2, goal:1000, lp:.25,tp:.40,wp:.20,mp:.15},
+  {name:'The Interstate',   bg:0x5C4A30, sky:0x806040, speed:560, density:0.8, goal:1200, lp:.20,tp:.35,wp:.25,mp:.20},
+];
+
+// ─────────────────── STATE ────────────────────────────────────────────────────
+let STATE = 'start'; // start|instructions|playing|dead|lvlcomplete|win
+let lvl = 0, meters = 0, score = 0, combo = 0, multi = 1.0;
+let hasActed = false; // for collision guard on very first frame
+let graceT = 1.2; // invincibility window at level start (seconds)
+let hopY = 0, hopVY = 0, spinning = 0;
+let tucked = false, hopping = false;
+let dead = false, deathT = 0;
+let respawning = false, respawnT = 0;
+let lvlCompleteT = 0;
+let checkpoint = 0;
+let spawnT = 0, lastType = '', consecSame = 0;
+let tornadoOn = false, tornadoT = 0;
+let surviveT = 0, whistleOn = false;
+let poleOff = 0, dashOff = 0;
+let inDanger = false;
+let multiFlashT = 0, multiFlashRed = false, multiScale = 1.0;
+
+// Start screen state
+let ssX = -W / 2, ssBounce = 0, ssRot = 0;
+let rrX = -9999, rrOn = false, rrT = 8;
+let sibX = 9999, sibOn = false, sibT = 15;
+let skyT = 0;
+
+// Pointer
+let pDown = false, pDownT = 0;
+let holdFired = false, holdTimer = null;
+
+// ─────────────────── THREE.JS ─────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(W, H);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+document.getElementById('gc').appendChild(renderer.domElement);
+renderer.domElement.style.position = 'fixed';
+renderer.domElement.style.top = '0';
+renderer.domElement.style.left = '0';
+
+const scene = new THREE.Scene();
+const cam = new THREE.OrthographicCamera(-W/2, W/2, H/2, -H/2, -500, 500);
+cam.position.z = 100;
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, cam));
+const bloom = new UnrealBloomPass(new THREE.Vector2(W, H), 0.4, 0.4, 0.75);
+composer.addPass(bloom);
+
+// ─── HUD Canvas ───────────────────────────────────────────────────────────────
+const hc = document.getElementById('hud-canvas');
+hc.width = W; hc.height = H;
+const hctx = hc.getContext('2d');
+
+// ─── Helper: Ellipse Geometry (Three.js has no built-in EllipseGeometry) ─────
+function makeEllipseGeo(rx, ry, segs = 16) {
+  const shape = new THREE.Shape();
+  shape.ellipse(0, 0, rx, ry, 0, Math.PI * 2, false, 0);
+  return new THREE.ShapeGeometry(shape, segs);
+}
+
+// ─── Scene construction ───────────────────────────────────────────────────────
+// Background (sky)
+const bgGeo = new THREE.PlaneGeometry(W, H);
+const bgMat = new THREE.MeshBasicMaterial({ color: 0xE8A042 });
+const bgMesh = new THREE.Mesh(bgGeo, bgMat);
+bgMesh.position.set(0, 0, -20);
+scene.add(bgMesh);
+
+// Road
+const roadMat = new THREE.MeshBasicMaterial({ color: 0x555550 });
+const roadH = H * 0.30;
+const roadMesh = new THREE.Mesh(new THREE.PlaneGeometry(W, roadH), roadMat);
+roadMesh.position.set(0, ROAD_WORLD_Y - roadH / 2, -18);
+scene.add(roadMesh);
+
+// Road dash group
+const dashGrp = new THREE.Group();
+scene.add(dashGrp);
+const dashMat = new THREE.MeshBasicMaterial({ color: 0xE8D870, transparent: true, opacity: 1 });
+const dashMeshes = [];
+const numDashes = Math.ceil(W / DASH_SPACING) + 3;
+for (let i = 0; i < numDashes; i++) {
+  const dm = new THREE.Mesh(new THREE.PlaneGeometry(38 * BS, 5 * BS), dashMat);
+  dm.position.set(-W / 2 + i * DASH_SPACING, ROAD_WORLD_Y - 10 * BS, -17);
+  dashGrp.add(dm);
+  dashMeshes.push(dm);
+}
+
+// Telephone poles
+const poleGrp = new THREE.Group(); scene.add(poleGrp);
+const poleMeshes = [];
+const poleH = H * 0.46;
+const poleMat = new THREE.MeshBasicMaterial({ color: 0x6B4A2A });
+for (let i = 0; i < 6; i++) {
+  const g = new THREE.Group();
+  const shaft = new THREE.Mesh(new THREE.PlaneGeometry(4 * BS, poleH), poleMat);
+  shaft.position.set(0, poleH / 2, 0);
+  g.add(shaft);
+  const cb = new THREE.Mesh(new THREE.PlaneGeometry(28 * BS, 4 * BS), poleMat);
+  cb.position.set(0, poleH * 0.88, 0.1);
+  g.add(cb);
+  g.position.set(-W / 2 + i * POLE_SPACING, ROAD_WORLD_Y, -14);
+  poleGrp.add(g);
+  poleMeshes.push(g);
+}
+
+// ─── Dusty Group ──────────────────────────────────────────────────────────────
+const dustyGrp = new THREE.Group();
+scene.add(dustyGrp);
+
+// Outer torus (ring)
+const torusMat = new THREE.MeshBasicMaterial({ color: 0xC8853A });
+const torus = new THREE.Mesh(new THREE.TorusGeometry(DR, 2.5 * BS, 8, 32), torusMat);
+dustyGrp.add(torus);
+
+// Inner stick group (rotates with body — eyes inside this)
+const stickGrp = new THREE.Group();
+dustyGrp.add(stickGrp);
+
+const stickMat = new THREE.LineBasicMaterial({ color: 0x8B5C1A });
+const stick2Mat = new THREE.LineBasicMaterial({ color: 0xA06830 });
+
+function mkLine(mat, x1,y1,x2,y2) {
+  const g = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(x1,y1,0), new THREE.Vector3(x2,y2,0)
+  ]);
+  return new THREE.Line(g, mat);
+}
+
+// Radial sticks
+for (let i = 0; i < 14; i++) {
+  const a = (i / 14) * Math.PI * 2;
+  const len = DR * (0.65 + (i % 3) * 0.12);
+  stickGrp.add(mkLine(stickMat, 0, 0, Math.cos(a) * len, Math.sin(a) * len));
+}
+// Cross sticks
+for (let i = 0; i < 8; i++) {
+  const a1 = (i / 8) * Math.PI * 2 + 0.15;
+  const a2 = a1 + 0.9 + (i % 2) * 0.3;
+  stickGrp.add(mkLine(stick2Mat,
+    Math.cos(a1)*DR*0.45, Math.sin(a1)*DR*0.45,
+    Math.cos(a2)*DR*0.88, Math.sin(a2)*DR*0.88));
+}
+
+// Eyes (part of stickGrp — rotate with body)
+const eyeMat = new THREE.MeshBasicMaterial({ color: 0x1A0A00 });
+const eyeR = DR * 0.44;
+const eyeA = Math.PI / 4;
+const eye1 = new THREE.Mesh(new THREE.CircleGeometry(3.5 * BS, 10), eyeMat);
+eye1.position.set(Math.cos(eyeA) * eyeR, Math.sin(eyeA) * eyeR, 1);
+stickGrp.add(eye1);
+const eye2 = new THREE.Mesh(new THREE.CircleGeometry(3.5 * BS, 10), eyeMat);
+eye2.position.set(Math.cos(eyeA + Math.PI) * eyeR, Math.sin(eyeA + Math.PI) * eyeR, 1);
+stickGrp.add(eye2);
+
+// Squish (flat oval, hidden normally)
+const squishGeo = makeEllipseGeo(DR * 1.5, DR * 0.28, 16);
+const squishMat = new THREE.MeshBasicMaterial({ color: 0x8B5C1A });
+const squishMesh = new THREE.Mesh(squishGeo, squishMat);
+squishMesh.position.z = 0.5;
+squishMesh.visible = false;
+dustyGrp.add(squishMesh);
+
+// Death X eyes (separate group at scene level)
+const deathGrp = new THREE.Group();
+deathGrp.visible = false;
+deathGrp.position.z = 10;
+scene.add(deathGrp);
+const xMat = new THREE.LineBasicMaterial({ color: 0xFF4422 });
+const XS = 7 * BS;
+function addXEye(rx, ry) {
+  deathGrp.add(mkLine(xMat, rx-XS,ry-XS, rx+XS,ry+XS));
+  deathGrp.add(mkLine(xMat, rx+XS,ry-XS, rx-XS,ry+XS));
+}
+
+// ─── Start screen decorations ──────────────────────────────────────────────────
+// Static cactus (left)
+const cactusGrp = new THREE.Group(); scene.add(cactusGrp);
+const cactMat = new THREE.MeshBasicMaterial({ color: 0x3A6B2A });
+(function(){
+  const trunk = new THREE.Mesh(new THREE.PlaneGeometry(11*BS, 82*BS), cactMat);
+  trunk.position.set(0, 41*BS, 0);
+  cactusGrp.add(trunk);
+  const la = new THREE.Mesh(new THREE.PlaneGeometry(7*BS, 30*BS), cactMat);
+  la.position.set(-14*BS, 52*BS, 0); la.rotation.z = Math.PI/3;
+  cactusGrp.add(la);
+  const ra = new THREE.Mesh(new THREE.PlaneGeometry(7*BS, 28*BS), cactMat);
+  ra.position.set(14*BS, 47*BS, 0); ra.rotation.z = -Math.PI/4;
+  cactusGrp.add(ra);
+  cactusGrp.position.set(-W/2 + W*0.15, ROAD_WORLD_Y, -2);
+})();
+
+// Static truck (right)
+const truckGrp = new THREE.Group(); scene.add(truckGrp);
+const truckBodyMat = new THREE.MeshBasicMaterial({ color: 0x7A3A1A });
+const wsMat = new THREE.MeshBasicMaterial({ color: 0x2A7A7A });
+(function(){
+  const bd = new THREE.Mesh(new THREE.PlaneGeometry(90*BS, 48*BS), truckBodyMat);
+  bd.position.set(0, 24*BS, 0); truckGrp.add(bd);
+  const cab = new THREE.Mesh(new THREE.PlaneGeometry(36*BS, 38*BS), truckBodyMat);
+  cab.position.set(28*BS, 43*BS, .1); truckGrp.add(cab);
+  const ws2 = new THREE.Mesh(new THREE.PlaneGeometry(26*BS, 20*BS), wsMat);
+  ws2.position.set(27*BS, 52*BS, .2); truckGrp.add(ws2);
+  truckGrp.position.set(-W/2 + W*0.78, ROAD_WORLD_Y, -2);
+  truckGrp.rotation.z = -0.05;
+})();
+
+// Roadrunner
+const rrGrp = new THREE.Group(); scene.add(rrGrp);
+rrGrp.visible = false;
+const rrMat = new THREE.MeshBasicMaterial({ color: 0x4A4A3A });
+(function(){
+  const body = new THREE.Mesh(makeEllipseGeo(16*BS, 10*BS, 14), rrMat);
+  rrGrp.add(body);
+  const head = new THREE.Mesh(new THREE.CircleGeometry(8*BS, 12), rrMat);
+  head.position.set(14*BS, 6*BS, 0); rrGrp.add(head);
+  const tail = new THREE.Mesh(new THREE.PlaneGeometry(20*BS, 4*BS), rrMat);
+  tail.position.set(-20*BS, 3*BS, 0); tail.rotation.z = .25; rrGrp.add(tail);
+  rrGrp.position.z = 4;
+})();
+const RR_Y = ROAD_WORLD_Y + 12 * BS;
+
+// Tumbleweed sibling
+const sibGrp = new THREE.Group(); scene.add(sibGrp);
+sibGrp.visible = false;
+const sibMat = new THREE.LineBasicMaterial({ color: 0xA06830 });
+const SIB_R = 18 * BS;
+for (let i = 0; i < 8; i++) {
+  const a = (i/8)*Math.PI*2;
+  sibGrp.add(mkLine(sibMat, 0,0, Math.cos(a)*SIB_R, Math.sin(a)*SIB_R));
+}
+const SIB_Y = ROAD_WORLD_Y + SIB_R;
+
+// ─── Obstacles ────────────────────────────────────────────────────────────────
+const OBS_POOL = [];
+let obstacles = [];
+
+function getObsObj() {
+  let f = OBS_POOL.find(o => !o.alive);
+  if (!f) { const g = new THREE.Group(); scene.add(g); f = {g, alive:false}; OBS_POOL.push(f); }
+  return f;
+}
+
+function clearChildren(g) { while(g.children.length) g.remove(g.children[0]); }
+
+function buildObstacleMesh(type, lvidx) {
+  const isNight = lvidx === 3;
+  const g = new THREE.Group();
+  let w, h;
+
+  if (type === 'low') {
+    const isRock = Math.random() < 0.4;
+    if (isRock) {
+      const mat = new THREE.MeshBasicMaterial({ color: isNight ? 0x44FF88 : 0x8B6A3A });
+      w = (28 + Math.random()*18) * BS;
+      h = (40 + Math.random()*18) * BS;
+      const rock = new THREE.Mesh(makeEllipseGeo(w/2, h*0.55, 10), mat);
+      rock.position.set(0, h*0.55, 0);
+      g.add(rock);
+    } else {
+      const mat = new THREE.MeshBasicMaterial({ color: isNight ? 0x44FF88 : 0x3A6B2A });
+      w = 14 * BS;
+      h = (45 + Math.random()*20) * BS;
+      const trunk = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+      trunk.position.set(0, h/2, 0); g.add(trunk);
+      const arm = new THREE.Mesh(new THREE.PlaneGeometry(w*0.7, h*0.38), mat);
+      arm.position.set(-w, h*0.62, .1); arm.rotation.z = Math.PI/3; g.add(arm);
+    }
+    return { g, w: Math.max(w, 16*BS), h: Math.max(h, 40*BS) };
+  }
+
+  if (type === 'tall') {
+    h = (88 + Math.random()*32) * BS;
+    w = 64 * BS;
+    const mat = new THREE.MeshBasicMaterial({ color: isNight ? 0xFF2244 : 0x7A3A1A });
+    const body = new THREE.Mesh(new THREE.PlaneGeometry(w, h*0.55), mat);
+    body.position.set(0, h*0.275, 0); g.add(body);
+    const cab = new THREE.Mesh(new THREE.PlaneGeometry(w*0.5, h*0.38), mat);
+    cab.position.set(w*0.2, h*0.69, .1); g.add(cab);
+    const wm2 = new THREE.MeshBasicMaterial({ color: isNight ? 0xFF9999 : 0x2A7A7A });
+    const wsm = new THREE.Mesh(new THREE.PlaneGeometry(w*0.38, h*0.22), wm2);
+    wsm.position.set(w*0.18, h*0.80, .2); g.add(wsm);
+    return { g, w, h };
+  }
+
+  if (type === 'wide') {
+    w = lvidx === 4 ? 280*BS : (lvidx === 3 ? 240*BS : (160 + Math.random()*40)*BS);
+    h = (92 + Math.random()*20) * BS;
+    const mat = new THREE.MeshBasicMaterial({ color: isNight ? 0xFF2244 : 0x5A3010 });
+    const box = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+    box.position.set(0, h/2, 0); g.add(box);
+    const det = new THREE.MeshBasicMaterial({ color: isNight ? 0xFF6666 : 0x7A5030 });
+    const l1 = new THREE.Mesh(new THREE.PlaneGeometry(w, 3*BS), det);
+    l1.position.set(0, h*.33, .1); g.add(l1);
+    const l2 = new THREE.Mesh(new THREE.PlaneGeometry(w, 3*BS), det);
+    l2.position.set(0, h*.66, .1); g.add(l2);
+    return { g, w, h };
+  }
+
+  return { g, w: 20*BS, h: 50*BS };
+}
+
+function spawnObs(lvidx) {
+  const cfg = LEVELS[lvidx];
+  const spd = cfg.speed * BS;
+  const spawnX = W/2 + 120*BS;
+
+  // Choose type
+  const r = Math.random();
+  let type;
+  if (r < cfg.lp) type = 'low';
+  else if (r < cfg.lp + cfg.tp) type = 'tall';
+  else if (r < cfg.lp + cfg.tp + cfg.wp) type = 'wide';
+  else type = 'mixed';
+
+  // Consecutive limit
+  if (type === lastType) {
+    consecSame++;
+    if (consecSame >= 4) { type = type === 'low' ? 'tall' : 'low'; consecSame = 0; }
+  } else { consecSame = 0; lastType = type; }
+
+  function addOne(t, x) {
+    const obj = getObsObj();
+    clearChildren(obj.g);
+    const { g: mesh, w, h } = buildObstacleMesh(t, lvidx);
+    obj.g.add(mesh);
+    obj.g.position.set(x, ROAD_WORLD_Y, 2);
+    obj.alive = true;
+    obj.speed = spd;
+    obj.type = t;
+    obj.cleared = false;
+    obj.w = w; obj.h = h;
+    obstacles.push(obj);
+  }
+
+  if (type === 'mixed' && lvidx >= 2) {
+    const t1 = Math.random() < 0.5 ? 'tall' : 'low';
+    const t2 = t1 === 'tall' ? 'low' : 'tall';
+    addOne(t1, spawnX);
+    const gap = spd * 0.4;
+    addOne(t2, spawnX + gap);
+  } else {
+    if (type === 'mixed') type = Math.random() < 0.5 ? 'low' : 'tall';
+    addOne(type, spawnX);
+  }
+}
+
+function clearObs() {
+  for (const o of obstacles) { o.alive = false; o.g.position.x = -9999; }
+  obstacles = [];
+}
+
+// ─────────────────── AUDIO ────────────────────────────────────────────────────
+let audioReady = false;
+let slideSynth, pluckSynth, bassSynth, kickSynth, snareSynth, hihatSynth,
+    whistleSynth, maracasSynth;
+let slideTremolo;
+let hopSynth, tuckSynth, tuckRelSynth, sqNoise, sqSynth;
+let cactSynth, carSynth, rollingNoise;
+let rrSynth, jingleSynth, jinglePluck;
+let startLoop = null, gameLoop = null;
+let gameBeat = 0;
+
+function initAudio() {
+  return Tone.start().then(() => {
+    if (audioReady) return;
+    audioReady = true;
+
+    slideTremolo = new Tone.Tremolo({ frequency: 12, depth: 0.9 }).toDestination();
+    slideTremolo.wet.value = 0;
+    slideTremolo.start();
+
+    const slideVib = new Tone.Vibrato({ depth: 0.3, frequency: 5 }).connect(slideTremolo);
+    slideSynth = new Tone.Synth({
+      oscillator: { type: 'sawtooth' }, portamento: 0.08,
+      envelope: { attack:.01, decay:.1, sustain:.7, release:.3 }
+    }).connect(slideVib);
+    slideSynth.volume.value = -9;
+
+    pluckSynth = new Tone.PluckSynth({ attackNoise:2, dampening:3000, resonance:.95 }).toDestination();
+    pluckSynth.volume.value = -15;
+
+    bassSynth = new Tone.Synth({
+      oscillator: { type:'sine' },
+      envelope: { attack:.05, decay:.2, sustain:.8, release:.4 }
+    }).toDestination();
+    bassSynth.volume.value = -12;
+
+    kickSynth = new Tone.MembraneSynth({
+      pitchDecay:.08, octaves:6,
+      envelope: { attack:.001, decay:.3, sustain:0, release:.1 }
+    }).toDestination();
+    kickSynth.volume.value = -10;
+
+    snareSynth = new Tone.NoiseSynth({
+      noise:{ type:'white' },
+      envelope: { attack:.001, decay:.15, sustain:0, release:.1 }
+    }).toDestination();
+    snareSynth.volume.value = -14;
+
+    hihatSynth = new Tone.NoiseSynth({
+      noise:{ type:'white' },
+      envelope: { attack:.001, decay:.05, sustain:0, release:.02 }
+    }).toDestination();
+    hihatSynth.volume.value = -20;
+
+    whistleSynth = new Tone.Synth({
+      oscillator:{type:'sine'},
+      envelope:{ attack:.02, decay:.05, sustain:.9, release:.2 }
+    }).toDestination();
+    whistleSynth.volume.value = -22;
+
+    maracasSynth = new Tone.NoiseSynth({
+      noise:{type:'pink'},
+      envelope:{ attack:0, decay:.02, sustain:0, release:.02 }
+    }).toDestination();
+    maracasSynth.volume.value = -24;
+
+    // SFX
+    hopSynth = new Tone.Synth({
+      oscillator:{type:'triangle'},
+      envelope:{ attack:.005, decay:.08, sustain:0, release:.1 }
+    }).toDestination();
+    hopSynth.volume.value = -5;
+
+    const tuckFilt = new Tone.Filter({ frequency:200, type:'lowpass', Q:3 }).toDestination();
+    tuckSynth = new Tone.Synth({
+      oscillator:{type:'sawtooth'},
+      envelope:{ attack:.03, decay:.15, sustain:.4, release:.2 }
+    }).connect(tuckFilt);
+    tuckSynth.volume.value = -8;
+
+    tuckRelSynth = new Tone.Synth({
+      oscillator:{type:'triangle'}, portamento:.1,
+      envelope:{ attack:.005, decay:.12, sustain:0, release:.05 }
+    }).toDestination();
+    tuckRelSynth.volume.value = -8;
+
+    sqNoise = new Tone.NoiseSynth({
+      noise:{type:'white'},
+      envelope:{ attack:0, decay:.3, sustain:0, release:.1 }
+    }).toDestination();
+    sqNoise.volume.value = -4;
+
+    sqSynth = new Tone.Synth({
+      oscillator:{type:'sine'}, portamento:.25,
+      envelope:{ attack:0, decay:.25, sustain:0, release:.1 }
+    }).toDestination();
+    sqSynth.volume.value = -6;
+
+    cactSynth = new Tone.Synth({
+      oscillator:{type:'triangle'},
+      envelope:{ attack:.005, decay:.06, sustain:0, release:.05 }
+    }).toDestination();
+    cactSynth.volume.value = -6;
+
+    const carFilt = new Tone.Filter({ frequency:400, type:'bandpass' }).toDestination();
+    carSynth = new Tone.Synth({
+      oscillator:{type:'sawtooth'},
+      envelope:{ attack:.01, decay:.2, sustain:0, release:.1 }
+    }).connect(carFilt);
+    carSynth.volume.value = -6;
+
+    const rlFilt = new Tone.Filter({ frequency:800, type:'highpass' }).toDestination();
+    rollingNoise = new Tone.NoiseSynth({
+      noise:{type:'pink'},
+      envelope:{ attack:.5, decay:0, sustain:1, release:.3 }
+    }).connect(rlFilt);
+    rollingNoise.volume.value = -28;
+
+    rrSynth = new Tone.Synth({
+      oscillator:{type:'triangle'},
+      envelope:{ attack:.001, decay:.04, sustain:0, release:.01 }
+    }).toDestination();
+    rrSynth.volume.value = -5;
+
+    jingleSynth = new Tone.Synth({
+      oscillator:{type:'triangle'},
+      envelope:{ attack:.01, decay:.12, sustain:0, release:.05 }
+    }).toDestination();
+    jingleSynth.volume.value = -6;
+
+    jinglePluck = new Tone.PluckSynth({ attackNoise:2, dampening:3000, resonance:.95 }).toDestination();
+    jinglePluck.volume.value = -8;
+
+    startScreenMusic();
+  }).catch(() => {});
+}
+
+function startScreenMusic() {
+  if (startLoop) { try { startLoop.stop().dispose(); } catch(e){} startLoop = null; }
+  if (gameLoop) { try { gameLoop.stop().dispose(); } catch(e){} gameLoop = null; }
+  Tone.Transport.bpm.value = 108;
+  const hook = ['E4','D4','C4','B3'];
+  let bi = 0, bar = 0;
+  startLoop = new Tone.Loop(t => {
+    slideSynth.triggerAttackRelease(hook[bi%4], '4n', t);
+    bassSynth.triggerAttackRelease(bi%2===0?'E2':'B2', '4n', t);
+    if (bar%4===0) pluckSynth.triggerAttackRelease('E2', '2n', t+.05);
+    if (bar%16===0 && bar>0) whistleSynth.triggerAttackRelease('E5', '4n', t+.1);
+    bi++; if (bi%4===0) bar++;
+  }, '4n');
+  startLoop.start(0);
+  Tone.Transport.start();
+}
+
+function startGameplayMusic() {
+  if (startLoop) { try { startLoop.stop().dispose(); } catch(e){} startLoop = null; }
+  if (gameLoop) { try { gameLoop.stop().dispose(); } catch(e){} gameLoop = null; }
+  Tone.Transport.bpm.value = 132 + lvl * 6;
+  gameBeat = 0;
+  const hook = ['E4','D4','C4','B3'];
+  const bass = ['E2','B2','D2'];
+  let hi = 0;
+
+  if (rollingNoise) { try { rollingNoise.triggerAttack(); } catch(e){} }
+
+  gameLoop = new Tone.Loop(t => {
+    const b = gameBeat % 16;
+    // Slide guitar hook every 8 beats
+    if (gameBeat % 8 === 0) { try { slideSynth.triggerAttackRelease(hook[hi%4],'4n',t); hi++; } catch(e){} }
+    // Pluck rhythm
+    if (b===0||b===8) { try { pluckSynth.triggerAttackRelease('E3','8n',t); } catch(e){} }
+    if (b===4) { try { pluckSynth.triggerAttackRelease('A3','8n',t); } catch(e){} }
+    // Bass
+    try { bassSynth.triggerAttackRelease(bass[gameBeat%3],'8n',t); } catch(e){}
+    // Kick (0,8) Snare (4,12)
+    if (b===0||b===8) { try { kickSynth.triggerAttackRelease('C1','8n',t); } catch(e){} }
+    if (b===4||b===12) {
+      if (lvl!==3) { try { snareSynth.triggerAttack(t); snareSynth.triggerRelease(t+.15); } catch(e){} }
+    }
+    // Hi-hat every beat
+    try { hihatSynth.triggerAttack(t); hihatSynth.triggerRelease(t+.05); } catch(e){}
+    // Whistle after 15s
+    if (whistleOn && gameBeat%32>=8 && gameBeat%32<=15) {
+      try { whistleSynth.triggerAttackRelease('E5','8n',t); } catch(e){}
+    }
+    // Maracas bar 2+
+    if (gameBeat>=4) { try { maracasSynth.triggerAttack(t); maracasSynth.triggerRelease(t+.02); } catch(e){} }
+    gameBeat++;
+  }, '8n');
+  gameLoop.start(0);
+  Tone.Transport.start();
+}
+
+function stopAllMusic() {
+  try { if (startLoop) startLoop.stop(); } catch(e){}
+  try { if (gameLoop) gameLoop.stop(); } catch(e){}
+}
+
+function sfx_hop() {
+  if (!audioReady) return;
+  try { hopSynth.triggerAttackRelease('C5','16n'); } catch(e){}
+  setTimeout(()=>{ try { hopSynth.triggerAttackRelease('E5','32n'); } catch(e){} }, 60);
+}
+
+function sfx_tuck() { if (!audioReady) return; try { tuckSynth.triggerAttackRelease('G2','4n'); } catch(e){} }
+
+function sfx_tuckRel() {
+  if (!audioReady) return;
+  try { tuckRelSynth.triggerAttackRelease('C3','8n'); } catch(e){}
+  setTimeout(()=>{ try { tuckRelSynth.triggerAttackRelease('E4','16n'); } catch(e){} }, 100);
+}
+
+function sfx_squish() {
+  if (!audioReady) return;
+  try { sqNoise.triggerAttackRelease('8n'); sqSynth.triggerAttackRelease('B3','8n'); } catch(e){}
+  setTimeout(()=>{ try { sqSynth.triggerAttackRelease('F2','4n'); } catch(e){} }, 60);
+}
+
+function sfx_cactCleared() {
+  if (!audioReady) return;
+  try { cactSynth.triggerAttackRelease('G4','16n'); } catch(e){}
+  setTimeout(()=>{ try { cactSynth.triggerAttackRelease('B4','16n'); } catch(e){} }, 65);
+}
+
+function sfx_carThru() { if (!audioReady) return; try { carSynth.triggerAttackRelease('E3','8n'); } catch(e){} }
+
+function sfx_rr() {
+  if (!audioReady) return;
+  try { rrSynth.triggerAttackRelease('F4','32n'); } catch(e){}
+  setTimeout(()=>{ try { rrSynth.triggerAttackRelease('G4','32n'); } catch(e){} }, 45);
+}
+
+function sfx_deathGliss() {
+  if (!audioReady) return;
+  setTimeout(()=>{
+    try {
+      const s = new Tone.Synth({
+        oscillator:{type:'sawtooth'}, portamento:.6,
+        envelope:{ attack:.01, decay:.7, sustain:0, release:.1 }
+      }).toDestination();
+      s.volume.value = -6;
+      s.triggerAttackRelease('E4','4n');
+      setTimeout(()=>{ try { s.triggerAttackRelease('B2','4n'); } catch(e){} setTimeout(()=>{ try { s.dispose(); } catch(e){} }, 2000); }, 150);
+    } catch(e){}
+  }, 400);
+}
+
+function sfx_levelComplete() {
+  if (!audioReady) return;
+  const ns = ['E4','G4','A4','B4','E5'];
+  ns.forEach((n,i) => setTimeout(()=>{ try { jingleSynth.triggerAttackRelease(n,'8n'); } catch(e){} }, i*170));
+  setTimeout(()=>{
+    try {
+      jinglePluck.triggerAttackRelease('E3','4n');
+      jinglePluck.triggerAttackRelease('G#3','4n');
+      jinglePluck.triggerAttackRelease('B3','4n');
+    } catch(e){}
+  }, 900);
+}
+
+function setDanger(on) {
+  if (!audioReady) return;
+  if (on === inDanger) return;
+  inDanger = on;
+  try { slideTremolo.wet.value = on ? 1 : 0; } catch(e){}
+  try { maracasSynth.volume.value = on ? -20 : -24; } catch(e){}
+}
+
+// ─────────────────── SVG BUILD ────────────────────────────────────────────────
+function buildSVG() {
+  const w = window.innerWidth, h = window.innerHeight;
+  const ts = Math.max(40, Math.min(w * 0.11, 118));
+  const cx = w/2, cy = h * 0.525;
+  const r = 42;
+
+  let cRow = '';
+  const nc = Math.floor(w/28);
+  for (let i=0;i<nc;i++) {
+    const x=i*28+14, y=h-30;
+    cRow += `<line x1="${x}" y1="${y}" x2="${x}" y2="${y-22}" stroke="#3A6B2A" stroke-width="2" opacity="0.5"/>`;
+    cRow += `<line x1="${x-5}" y1="${y-9}" x2="${x+5}" y2="${y-9}" stroke="#3A6B2A" stroke-width="2" opacity="0.5"/>`;
+    cRow += `<line x1="${x-8}" y1="${y-15}" x2="${x+8}" y2="${y-15}" stroke="#3A6B2A" stroke-width="2" opacity="0.5"/>`;
+  }
+
+  let twLines = '';
+  for (let i=0;i<8;i++){
+    const a=(i/8)*Math.PI*2;
+    twLines+=`<line x1="${cx}" y1="${cy}" x2="${cx+Math.cos(a)*r}" y2="${cy+Math.sin(a)*r}" stroke="#F5C842" stroke-width="1.5" opacity="0.5"/>`;
+  }
+  for (let i=0;i<4;i++){
+    const a=(i/4)*Math.PI*2+0.4;
+    twLines+=`<line x1="${cx}" y1="${cy}" x2="${cx+Math.cos(a)*30}" y2="${cy+Math.sin(a)*30}" stroke="#D4860A" stroke-width="1" opacity="0.4"/>`;
+  }
+
+  document.getElementById('sv').innerHTML = `
+<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">
+<defs>
+  <filter id="dg"><feGaussianBlur in="SourceGraphic" stdDeviation="8" result="b"/>
+    <feComposite in="SourceGraphic" in2="b" operator="over"/></filter>
+  <style>
+    @keyframes wobble{0%,100%{transform:translateX(0)}50%{transform:translateX(3px)}}
+    @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+    @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+    .ttl{animation:wobble 1.8s ease-in-out infinite}
+    .tws{animation:spin 2s linear infinite;transform-origin:${cx}px ${cy}px}
+    .tp2{animation:blink 1s ease-in-out infinite}
+  </style>
+</defs>
+<g class="ttl" filter="url(#dg)">
+  <text x="${cx}" y="${h*.30}" font-family="'Alfa Slab One',serif"
+    font-size="${ts}px" fill="#F5C842" letter-spacing="${ts*.08}px"
+    text-anchor="middle" dominant-baseline="middle">DUSTY ROLL</text>
+</g>
+<text x="${cx}" y="${h*.415}" font-family="sans-serif" font-style="italic"
+  font-size="${Math.max(11,ts*.21)}px" fill="#E8D870" text-anchor="middle" opacity=".82">
+  Three days rolling and not even tired.</text>
+<g class="tws">
+  <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#F5C842" stroke-width="2" opacity=".6" filter="url(#dg)"/>
+  ${twLines}
+  <circle cx="${cx}" cy="${cy}" r="5" fill="#F5C842" opacity=".8"/>
+  <circle cx="${cx+Math.cos(Math.PI/4)*r*.44}" cy="${cy+Math.sin(Math.PI/4)*r*.44}" r="2.5" fill="#3A2A14"/>
+  <circle cx="${cx+Math.cos(Math.PI/4+Math.PI)*r*.44}" cy="${cy+Math.sin(Math.PI/4+Math.PI)*r*.44}" r="2.5" fill="#3A2A14"/>
+</g>
+<text x="${cx}" y="${h*.72}" class="tp2"
+  font-family="'Alfa Slab One',serif" font-size="${Math.max(14,ts*.27)}px"
+  fill="#F5C842" text-anchor="middle">Tap to Start</text>
+${cRow}
+<line x1="0" y1="${h-7}" x2="${w}" y2="${h-7}" stroke="#8B4513" stroke-width="1"/>
+</svg>`;
+}
+buildSVG();
+
+// ─────────────────── INPUT ────────────────────────────────────────────────────
+document.addEventListener('pointerdown', e => {
+  if (STATE === 'start') {
+    initAudio().catch(()=>{});
+    STATE = 'instructions';
+    const instrEl = document.getElementById('is');
+    instrEl.style.display = 'flex';
+    document.getElementById('sv').style.transition = 'opacity .3s';
+    document.getElementById('sv').style.opacity = '0';
+    document.getElementById('ov').style.pointerEvents = 'none';
+    const ss = document.getElementById('startScreen');
+    if (ss) { ss.style.opacity = '0'; ss.style.display = 'none'; }
+    return;
+  }
+  if (STATE === 'instructions') {
+    STATE = 'playing';
+    document.getElementById('is').style.transition = 'opacity .3s';
+    document.getElementById('is').style.opacity = '0';
+    setTimeout(()=>{ document.getElementById('is').style.display='none'; document.getElementById('is').style.opacity='1'; }, 300);
+    document.getElementById('sv').style.display = 'none';
+    document.getElementById('ov').style.display = 'none';
+    const ss = document.getElementById('startScreen');
+    if (ss) ss.style.display = 'none';
+    cactusGrp.visible = false;
+    truckGrp.visible = false;
+    rrGrp.visible = false;
+    sibGrp.visible = false;
+    initLevel(0);
+    if (audioReady) startGameplayMusic();
+    return;
+  }
+  if (STATE !== 'playing') return;
+  if (dead || respawning) return;
+
+  pDown = true;
+  pDownT = performance.now();
+  holdFired = false;
+  if (holdTimer) clearTimeout(holdTimer);
+  holdTimer = setTimeout(()=>{
+    if (pDown && !hopping && !tucked && STATE==='playing' && !dead && !respawning) {
+      tucked = true;
+      holdFired = true;
+      hasActed = true;
+      sfx_tuck();
+    }
+  }, TAP_MS);
+}, { capture: true });
+
+document.addEventListener('pointerup', e => {
+  if (!pDown) return;
+  pDown = false;
+  if (holdTimer) clearTimeout(holdTimer);
+  const dur = performance.now() - pDownT;
+
+  if (STATE !== 'playing') return;
+  if (dead || respawning) return;
+
+  if (dur < TAP_MS && !holdFired) {
+    // TAP → HOP
+    if (!hopping) {
+      hopping = true;
+      hopY = 0; hopVY = HOP_VEL;
+      hasActed = true;
+      sfx_hop();
+    }
+  } else if (tucked && holdFired) {
+    tucked = false;
+    holdFired = false;
+    sfx_tuckRel();
+  }
+}, { capture: true });
+
+// ─────────────────── LEVEL INIT ───────────────────────────────────────────────
+function initLevel(l) {
+  lvl = l;
+  meters = 0; checkpoint = 0;
+  score = 0; combo = 0; multi = 1.0;
+  hasActed = false;
+  graceT = 1.2; // 1.2 second invincibility at level start
+  dead = false; deathT = 0;
+  respawning = false; respawnT = 0;
+  hopping = false; hopY = 0; hopVY = 0;
+  tucked = false; spinning = 0;
+  tornadoOn = false; tornadoT = 0;
+  surviveT = 0; whistleOn = false;
+  inDanger = false;
+  spawnT = 0; lastType = ''; consecSame = 0;
+  clearObs();
+  dustyGrp.visible = true;
+  squishMesh.visible = false;
+  torus.visible = true;
+  stickGrp.visible = true;
+  deathGrp.visible = false;
+  dustyGrp.scale.set(1,1,1);
+  dustyGrp.position.set(DUSTY_X, ROAD_WORLD_Y + DR, 5);
+  bgMat.color.set(LEVELS[l].bg);
+  bgMesh.material.color.set(LEVELS[l].bg);
+
+  const ann = document.getElementById('la');
+  ann.textContent = `Level ${l+1}: ${LEVELS[l].name}`;
+  ann.style.display = 'block'; ann.style.opacity = '1'; ann.style.transition = '';
+  setTimeout(()=>{
+    ann.style.transition = 'opacity 1s'; ann.style.opacity = '0';
+    setTimeout(()=>{ ann.style.display='none'; }, 1000);
+  }, 2200);
+
+  if (l===3) {
+    setTimeout(()=>{
+      const nh = document.getElementById('nh');
+      nh.textContent = 'GREEN = JUMP / RED = DUCK';
+      nh.style.display = 'block'; nh.style.opacity = '1'; nh.style.transition = '';
+      setTimeout(()=>{
+        nh.style.transition = 'opacity 1.5s'; nh.style.opacity = '0';
+        setTimeout(()=>{ nh.style.display='none'; }, 1500);
+      }, 2600);
+    }, 800);
+  }
+
+  if (audioReady && gameLoop) {
+    const bpms = [132,138,145,152,158];
+    try { Tone.Transport.bpm.rampTo(bpms[l], 2); } catch(e){}
+  }
+}
+
+// ─────────────────── DEATH & RESPAWN ─────────────────────────────────────────
+function triggerDeath() {
+  dead = true; deathT = 0.4;
+  hopping = false; tucked = false;
+  combo = 0; multi = 1.0;
+  multiFlashT = 0.3; multiFlashRed = true;
+  stopAllMusic();
+  sfx_squish();
+  sfx_deathGliss();
+
+  // Squish visual
+  squishMesh.visible = true;
+  torus.visible = false;
+  stickGrp.visible = false;
+  dustyGrp.scale.set(1,1,1);
+
+  // X eyes at Dusty position
+  deathGrp.visible = true;
+  while(deathGrp.children.length) deathGrp.remove(deathGrp.children[0]);
+  const dx = dustyGrp.position.x, dy = dustyGrp.position.y;
+  const er = DR * 0.44;
+  addXEye(dx + Math.cos(eyeA)*er, dy + Math.sin(eyeA)*er);
+  addXEye(dx + Math.cos(eyeA+Math.PI)*er, dy + Math.sin(eyeA+Math.PI)*er);
+}
+
+function triggerLevelComplete() {
+  STATE = 'lvlcomplete'; lvlCompleteT = 3.0;
+  stopAllMusic();
+  sfx_levelComplete();
+  const ann = document.getElementById('la');
+  ann.textContent = lvl < 4 ? `Level ${lvl+1} Complete!` : 'You Made It!';
+  ann.style.display = 'block'; ann.style.opacity = '1'; ann.style.transition = '';
+}
+
+function triggerWin() {
+  STATE = 'win';
+  const ws = document.getElementById('ws');
+  ws.style.display = 'flex';
+  setTimeout(()=>{
+    ws.style.background = 'rgba(255,255,255,.96)';
+    document.getElementById('wt').style.opacity = '1';
+  }, 500);
+}
+
+// ─────────────────── CURRENT SPEED ───────────────────────────────────────────
+function curSpeed() {
+  const cfg = LEVELS[lvl];
+  let spd = cfg.speed * BS;
+  if (lvl===4 && meters >= cfg.goal * 0.8) spd = 640 * BS;
+  if (tornadoOn) spd *= 2;
+  return spd;
+}
+
+// ─────────────────── UPDATE ───────────────────────────────────────────────────
+function update(dt) {
+  if (STATE === 'start') { updateStart(dt); return; }
+  if (STATE !== 'playing' && STATE !== 'lvlcomplete') return;
+
+  const spd = curSpeed();
+  const cfg = LEVELS[lvl];
+
+  // Scroll background
+  poleOff += 20 * BS * dt;
+  if (poleOff > POLE_SPACING) poleOff -= POLE_SPACING;
+  poleMeshes.forEach((p,i) => {
+    let px = -W/2 + i*POLE_SPACING - poleOff;
+    while (px < -W/2 - POLE_SPACING*0.5) px += POLE_SPACING * poleMeshes.length;
+    p.position.x = px;
+  });
+
+  dashOff += spd * dt;
+  if (dashOff > DASH_SPACING) dashOff -= DASH_SPACING;
+  dashMeshes.forEach((d,i) => {
+    let dx = -W/2 + i*DASH_SPACING - dashOff;
+    while (dx < -W/2 - DASH_SPACING) dx += DASH_SPACING * dashMeshes.length;
+    d.position.x = dx;
+  });
+
+  if (STATE === 'lvlcomplete') {
+    lvlCompleteT -= dt;
+    if (lvlCompleteT <= 0) {
+      const ann = document.getElementById('la');
+      ann.style.transition = 'opacity .5s'; ann.style.opacity = '0';
+      setTimeout(()=>{ ann.style.display='none'; }, 500);
+      if (lvl < 4) {
+        STATE = 'playing';
+        initLevel(lvl + 1);
+        if (audioReady) startGameplayMusic();
+      } else {
+        triggerWin();
+      }
+    }
+    return;
+  }
+
+  // Death timer
+  if (dead) {
+    deathT -= dt;
+    if (deathT <= 0) {
+      // Respawn
+      dead = false;
+      respawning = true; respawnT = 0.6;
+      graceT = 0.8; // invincibility after respawn
+      squishMesh.visible = false;
+      torus.visible = true;
+      stickGrp.visible = true;
+      deathGrp.visible = false;
+      dustyGrp.scale.set(0.1, 0.1, 1);
+      meters = checkpoint;
+      clearObs(); spawnT = 0;
+      if (audioReady) startGameplayMusic();
+    }
+    return;
+  }
+
+  if (respawning) {
+    respawnT -= dt;
+    const t = Math.max(0, 1 - respawnT / 0.6);
+    const s = 0.1 + t * 0.9;
+    dustyGrp.scale.set(s, s, 1);
+    if (respawnT <= 0) { respawning = false; dustyGrp.scale.set(1,1,1); }
+    return;
+  }
+
+  // Grace period countdown (invincibility after level start / respawn)
+  if (graceT > 0) graceT -= dt;
+
+  // Tornado (Level 3, 600m mark)
+  if (lvl===2 && !tornadoOn && meters >= 600 && hasActed) {
+    tornadoOn = true; tornadoT = 3.0;
+  }
+  if (tornadoOn) {
+    tornadoT -= dt;
+    if (tornadoT <= 0) tornadoOn = false;
+  }
+
+  // Survive timer → whistle unlock
+  surviveT += dt;
+  if (surviveT >= 15 && !whistleOn) whistleOn = true;
+
+  // Hop physics
+  if (hopping) {
+    hopY += hopVY * dt;
+    hopVY -= GRAVITY * dt;
+    if (hopY <= 0) { hopY = 0; hopVY = 0; hopping = false; }
+  }
+
+  // Dusty scale based on state
+  const tuckS = tucked ? (DR_TUCK / DR) : (hopping ? 1.1 : 1.0);
+  dustyGrp.scale.set(tuckS, tuckS, 1);
+  const baseY = ROAD_WORLD_Y + DR;
+  dustyGrp.position.y = baseY + hopY;
+  dustyGrp.position.x = DUSTY_X;
+
+  // Rotation: 1 full per 0.5s at base L1 speed
+  const rotPerSec = (spd / (LEVELS[0].speed * BS)) * (Math.PI * 2 / 0.5);
+  spinning += rotPerSec * dt;
+  stickGrp.rotation.z = -spinning;
+
+  // Meters update — always count once in playing state (hasActed guards collision, not meters)
+  meters += spd * dt / (60 * BS);
+  score += (spd * dt / (60 * BS)) * (lvl===4 ? 1.5 : 1);
+
+  // Checkpoint every 20%
+  const cpInterval = cfg.goal * 0.2;
+  if (meters > checkpoint + cpInterval) {
+    checkpoint = Math.floor(meters / cpInterval) * cpInterval;
+  }
+
+  // Danger detection
+  let nowDanger = false;
+  for (const o of obstacles) {
+    if (!o.alive) continue;
+    const dx = o.g.position.x - DUSTY_X;
+    if (dx > 0 && dx < W * 0.45 && dx / spd < 0.4) { nowDanger = true; break; }
+  }
+  setDanger(nowDanger);
+
+  // Obstacle spawn
+  spawnT -= dt;
+  if (spawnT <= 0) {
+    spawnObs(lvl);
+    const minGap = lvl >= 4 ? 0.7 : cfg.density;
+    spawnT = minGap * (0.85 + Math.random() * 0.3);
+  }
+
+  // Obstacle move + collision
+  const dustyR_cur = DR * tuckS;
+  const dustyCY = dustyGrp.position.y; // center Y in world
+  const dustyTopY = dustyCY + dustyR_cur;
+  const dustyBottomY = ROAD_WORLD_Y; // Dusty always above road
+
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    const o = obstacles[i];
+    if (!o.alive) continue;
+    o.g.position.x -= spd * dt;
+
+    // Off-screen left
+    if (o.g.position.x < -W/2 - o.w * 2) {
+      o.alive = false; o.g.position.x = -9999;
+      obstacles.splice(i, 1); continue;
+    }
+
+    // Cleared check
+    if (!o.cleared && o.g.position.x + o.w/2 < DUSTY_X - dustyR_cur) {
+      o.cleared = true;
+      if (hasActed && !dead) {
+        if (o.type === 'low' && (hopping || hopY > DR * 0.5)) {
+          sfx_cactCleared();
+          combo++; multi = Math.min(3.0, 1.0 + combo * 0.1);
+          score += Math.round(5 * multi * (lvl===4 ? 1.5 : 1));
+          multiFlashT = 0.15; multiScale = 1.2;
+        } else if ((o.type==='tall'||o.type==='wide') && tucked) {
+          sfx_carThru();
+          combo++; multi = Math.min(3.0, 1.0 + combo * 0.1);
+          score += Math.round(8 * multi * (lvl===4 ? 1.5 : 1));
+          multiFlashT = 0.15; multiScale = 1.2;
+        }
+      }
+    }
+
+    // Collision (X overlap)
+    const ox = o.g.position.x;
+    const hitX = Math.abs(ox - DUSTY_X) < (o.w * 0.42 + dustyR_cur * 0.65);
+    if (hitX && !dead && !respawning && graceT <= 0) {
+      if (o.type === 'low') {
+        // Dusty must hop over low obstacles.
+        // Dusty's bottom = hopY above road. Obstacle top = o.h.
+        // Hit if Dusty's bottom is below the obstacle top (not cleared it).
+        // Safe if hopY + DR (Dusty bottom-to-center) > o.h * 0.7
+        if (hopY < o.h * 0.6) {
+          triggerDeath(); break;
+        }
+      } else if (o.type === 'tall' || o.type === 'wide') {
+        // Dusty must tuck under tall/wide obstacles.
+        // Being airborne doesn't protect from tall objects.
+        // Only safe if tucked.
+        if (!tucked) {
+          triggerDeath(); break;
+        }
+      }
+    }
+  }
+
+  // Level complete
+  if (meters >= cfg.goal && STATE === 'playing') {
+    triggerLevelComplete();
+  }
+
+  // HUD
+  drawHUD(dt);
+}
+
+// ─────────────────── START SCREEN UPDATE ─────────────────────────────────────
+function updateStart(dt) {
+  // Dusty rolling L→R
+  ssX += 60 * BS * dt;
+  if (ssX > W/2 + DR*2) ssX = -W/2 - DR*2;
+  ssBounce = Math.sin(performance.now() / 1200 * Math.PI * 2) * 8 * BS;
+  ssRot += (Math.PI * 2 / 0.5) * (60/280) * dt;
+  dustyGrp.position.set(ssX, ROAD_WORLD_Y + DR + ssBounce, 5);
+  dustyGrp.scale.set(1,1,1);
+  stickGrp.rotation.z = -ssRot;
+  torus.visible = true; stickGrp.visible = true; squishMesh.visible = false;
+
+  // Sky color cycle
+  skyT += dt / 22;
+  const skyR = 0.91 + Math.sin(skyT * Math.PI * 2) * 0.04;
+  const skyG = 0.63 + Math.sin(skyT * Math.PI * 2) * 0.04;
+  bgMat.color.setRGB(skyR, skyG, 0.26);
+
+  // Pole scroll
+  poleOff += 20 * BS * dt;
+  if (poleOff > POLE_SPACING) poleOff -= POLE_SPACING;
+  poleMeshes.forEach((p,i)=>{
+    let px = -W/2 + i*POLE_SPACING - poleOff;
+    while(px < -W/2 - POLE_SPACING*0.5) px += POLE_SPACING * poleMeshes.length;
+    p.position.x = px;
+  });
+
+  // Roadrunner
+  rrT -= dt;
+  if (!rrOn && rrT <= 0) {
+    rrOn = true; rrX = -W/2 - 50*BS; rrT = 8;
+    sfx_rr();
+  }
+  if (rrOn) {
+    rrX += 600 * BS * dt;
+    const legBob = Math.sin(performance.now()/25) * 3 * BS;
+    rrGrp.position.set(rrX, RR_Y + legBob, 4);
+    rrGrp.visible = true;
+    if (rrX > W/2 + 80*BS) { rrOn = false; rrGrp.visible = false; }
+  }
+
+  // Tumbleweed sibling
+  sibT -= dt;
+  if (!sibOn && sibT <= 0) {
+    sibOn = true; sibX = W/2 + 50*BS; sibT = 15;
+  }
+  if (sibOn) {
+    sibX -= 40 * BS * dt;
+    sibGrp.position.set(sibX, SIB_Y, 4);
+    sibGrp.visible = true;
+    sibGrp.rotation.z += 2 * dt;
+    if (sibX < -W/2 - 50*BS) { sibOn = false; sibGrp.visible = false; }
+  }
+}
+
+// ─────────────────── HUD DRAW ─────────────────────────────────────────────────
+function drawHUD(dt) {
+  hctx.clearRect(0, 0, W, H);
+  if (STATE !== 'playing' && STATE !== 'lvlcomplete') return;
+  const cfg = LEVELS[lvl];
+  const pct = Math.min(1, meters / cfg.goal);
+
+  // Progress bar
+  const bW = W * 0.58, bX = W * 0.21, bH = Math.max(8, 12*BS), bY = Math.max(14, 18*BS);
+  hctx.fillStyle = 'rgba(0,0,0,.45)';
+  hctx.fillRect(bX, bY, bW, bH);
+  // Color
+  if (lvl===4) {
+    const t2 = Math.sin(performance.now()/200) * .5 + .5;
+    hctx.fillStyle = `rgb(${Math.round(245+t2*10)},${Math.round(180*t2)},${Math.round(66*t2)})`;
+  } else { hctx.fillStyle = '#F5C842'; }
+  hctx.fillRect(bX, bY, bW * pct, bH);
+  hctx.strokeStyle = '#8B4513'; hctx.lineWidth = 2;
+  hctx.strokeRect(bX, bY, bW, bH);
+
+  // Distance text
+  const fs1 = Math.max(11, Math.min(14*BS, 16));
+  hctx.fillStyle = '#E8D870'; hctx.font = `bold ${fs1}px sans-serif`;
+  hctx.textAlign = 'center';
+  hctx.fillText(`${Math.floor(meters)}m / ${cfg.goal}m`, W/2, bY + bH + fs1 + 3);
+
+  // Score
+  const fs2 = Math.max(13, Math.min(18*BS, 22));
+  hctx.textAlign = 'right';
+  hctx.font = `bold ${fs2}px sans-serif`;
+  hctx.fillStyle = '#FFFFFF';
+  hctx.fillText(Math.floor(score).toLocaleString(), W - Math.max(14,18*BS), Math.max(22,28*BS));
+
+  // Multiplier
+  if (multi > 1.01) {
+    multiFlashT -= dt;
+    if (multiScale > 1.0) multiScale = Math.max(1.0, multiScale - 3*dt);
+    const ms = multiScale;
+    hctx.save();
+    hctx.translate(W - Math.max(14,18*BS), Math.max(36,44*BS));
+    hctx.scale(ms, ms);
+    hctx.textAlign = 'right';
+    hctx.font = `bold ${Math.max(10,13*BS)}px sans-serif`;
+    hctx.fillStyle = (multiFlashRed && multiFlashT > 0) ? '#FF4422' : '#F5C842';
+    hctx.fillText(`×${multi.toFixed(1)}`, 0, 0);
+    hctx.restore();
+    if (multiFlashT <= 0) multiFlashRed = false;
+  }
+
+  // Level name
+  hctx.textAlign = 'left';
+  hctx.font = `bold ${Math.max(10,12*BS)}px sans-serif`;
+  hctx.fillStyle = '#E8D870';
+  hctx.fillText(`Lvl ${lvl+1}: ${cfg.name}`, Math.max(12,16*BS), Math.max(22,28*BS));
+
+  // Tornado overlay
+  if (tornadoOn) {
+    const alpha = 0.15 + Math.sin(performance.now()/80) * 0.12;
+    hctx.fillStyle = `rgba(255,68,34,${alpha})`;
+    hctx.fillRect(0, 0, W, H);
+    const fs3 = Math.max(22, Math.min(32*BS, 48));
+    hctx.textAlign = 'center';
+    hctx.font = `bold ${fs3}px 'Alfa Slab One',serif`;
+    hctx.fillStyle = '#FF4422';
+    hctx.fillText('⚡ TORNADO! ⚡', W/2, H/2 - 40*BS);
+  }
+}
+
+// ─────────────────── RENDER LOOP ──────────────────────────────────────────────
+let lastT = 0;
+function animate(t) {
+  requestAnimationFrame(animate);
+  const dt = Math.min((t - lastT) / 1000, 0.05);
+  lastT = t;
+  update(dt);
+  composer.render();
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>

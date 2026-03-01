@@ -1228,9 +1228,13 @@ function drawHUD(dt) {
   hctx.strokeStyle = '#8B4513'; hctx.lineWidth = 2;
   hctx.strokeRect(bX, bY, bW, bH);
 
+  // Text shadow for readability on any background
+  hctx.shadowColor = 'rgba(0,0,0,0.8)';
+  hctx.shadowBlur = 5;
+
   // Distance text
   const fs1 = Math.max(11, Math.min(14*BS, 16));
-  hctx.fillStyle = '#E8D870'; hctx.font = `bold ${fs1}px sans-serif`;
+  hctx.fillStyle = '#FFFFFF'; hctx.font = `bold ${fs1}px sans-serif`;
   hctx.textAlign = 'center';
   hctx.fillText(`${Math.floor(meters)}m / ${cfg.goal}m`, W/2, bY + bH + fs1 + 3);
 
@@ -1251,6 +1255,7 @@ function drawHUD(dt) {
     hctx.scale(ms, ms);
     hctx.textAlign = 'right';
     hctx.font = `bold ${Math.max(10,13*BS)}px sans-serif`;
+    hctx.shadowColor = 'rgba(0,0,0,0.8)'; hctx.shadowBlur = 5;
     hctx.fillStyle = (multiFlashRed && multiFlashT > 0) ? '#FF4422' : '#F5C842';
     hctx.fillText(`×${multi.toFixed(1)}`, 0, 0);
     hctx.restore();
@@ -1260,7 +1265,7 @@ function drawHUD(dt) {
   // Level name
   hctx.textAlign = 'left';
   hctx.font = `bold ${Math.max(10,12*BS)}px sans-serif`;
-  hctx.fillStyle = '#E8D870';
+  hctx.fillStyle = '#FFFFFF';
   hctx.fillText(`Lvl ${lvl+1}: ${cfg.name}`, Math.max(12,16*BS), Math.max(22,28*BS));
 
   // Tornado overlay
